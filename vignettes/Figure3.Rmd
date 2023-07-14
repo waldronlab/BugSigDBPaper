@@ -1,0 +1,738 @@
+---
+title: Figure3. Bug set enrichment analysis
+vignette: >
+  % \VignetteIndexEntry{Bug set enrichment analysis}
+  % \VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+output:
+  html_document:
+    mathjax: null   
+---
+
+```{r setup, message=FALSE}
+library(bugsigdbr)
+library(curatedMetagenomicData)
+library(ggpubr)
+library(ggrepel)
+library(enrichplot)
+library(mia)
+library(BiocSet)
+library(BugSigDBStats)
+library(CBEA)
+library(ComplexHeatmap)
+library(EnrichmentBrowser)
+library(RobustRankAggreg)
+```
+
+CRC dataset IDs:
+
+```{r datasets}
+crc.ids <- c("FengQ_2015", # adenoma, CRC, fatty liver, healthy, hypertension, T2D
+             "GuptaA_2019", # CRC, healthy
+             "HanniganGD_2017", # adenoma, CRC, healthy
+             "ThomasAM_2018a", # adenoma, cholesterolemia, CRC, healthy, hypercholesterolemia, hypertension, metastases, T2D
+             "ThomasAM_2018b", # CRC, healthy
+             # "ThomasAM_2019_c", # CRC, healthy ... overlaps with Yachida2019, ie exclude
+             "VogtmannE_2016", # CRC, healthy
+             "WirbelJ_2018", # CRC, healthy
+             "YachidaS_2019", # adenoma, carcinoma surgery history, CRC, few polyps, healthy   
+             "YuJ_2015", # CRC, healthy, T2D       
+             "ZellerG_2014") # adenoma, CRC, healthy      
+dsets <- paste(crc.ids, "relative_abundance", sep = ".")
+dsets                
+```
+
+Store as an experiment list:
+
+```{r, message = FALSE}
+all <- lapply(dsets, curatedMetagenomicData, dryrun = FALSE, counts = TRUE)
+all <- lapply(all, function(d) d[[1]])
+names(all) <- crc.ids
+all
+```
+
+Restrict to CRC vs control:
+
+```{r}
+all <- lapply(all, function(x) x[,x$study_condition %in% c("control", "CRC")])
+t(vapply(all, function(x) table(x$study_condition), integer(2)))
+```
+
+Distribution of age and sex:
+
+```{r}
+t(vapply(all, function(x) table(x$gender), integer(2)))
+t(vapply(all, function(x) summary(x$age)[1:6], numeric(6)))
+lapply(all, function(x) table(x$gender, x$study_condition))
+```
+
+## Differential abundance analysis
+
+Here we work on logCPMs:
+
+```{r}
+for(i in seq_along(all)) assay(all[[i]], "cpm") <- edgeR::cpm(assay(all[[i]]), 
+                                                              prior.count = 3,  
+                                                              log = TRUE) 
+```
+
+Perform differential expression analysis for all CRC datasets in the list
+(a use case for `GSEABenchmarkeR::deAna`):
+
+```{r}
+for(i in seq_along(all)) 
+{
+    all[[i]]$GROUP <- ifelse(all[[i]]$study_condition == "CRC", 1, 0)
+    all[[i]]$BLOCK <- all[[i]]$gender
+}        
+all <- lapply(all, EnrichmentBrowser::deAna, assay = "cpm")
+```
+
+## Microbe set enrichment analysis
+
+### Obtain microbe signatures from BugSigDB
+
+We start with working on the genus level:
+
+```{r}
+bsdb <- bugsigdbr::importBugSigDB(version = "10.5281/zenodo.5904281", cache = FALSE)
+sigs.genus <- bugsigdbr::getSignatures(bsdb,
+                                 tax.id.type = "taxname",    
+                                 tax.level = "genus",
+                                 exact.tax.level = FALSE)
+head(sigs.genus)
+```
+
+How many signatures with a least 5 microbes:
+
+```{r}
+table(lengths(sigs.genus) > 0)
+table(lengths(sigs.genus) > 4)
+```
+
+We also analyze the data on species level in parallel:
+
+```{r}
+sigs.species <- bugsigdbr::getSignatures(bsdb,
+                                         tax.id.type = "taxname",    
+                                         tax.level = "species",
+                                         exact.tax.level = FALSE)
+head(sigs.species)
+table(lengths(sigs.species) > 0)
+table(lengths(sigs.species) > 4)
+```
+
+### Harmonize taxonomic level
+
+```{r, warning = FALSE}
+for(i in seq_along(all)) altExps(all[[i]]) <- mia::splitByRanks(all[[i]])
+```
+
+Genus level:
+
+```{r}
+all.genus <- lapply(all, function(x) altExps(x)$genus)
+for(i in seq_along(all.genus)) 
+    assay(all.genus[[i]], "cpm") <- edgeR::cpm(assay(all.genus[[i]]),
+                                               log = TRUE,
+                                               prior.count = 3) 
+all.genus <- lapply(all.genus, EnrichmentBrowser::deAna, assay = "cpm")
+```
+
+Species level:
+
+```{r}
+for(i in seq_along(all))
+{
+    all[[i]] <- all[[i]][!is.na(rowData(all[[i]])$species),]
+    rownames(all[[i]]) <- rowData(all[[i]])$species
+}
+```
+
+### Enrichment analysis
+
+**Approach 1: merge datasets + perform enrichment analysis on merged dataset**
+
+**Species-level analysis**:
+
+Obtain merged dataset via cMD:
+
+```{r, message = FALSE}
+crc.metadata <- subset(curatedMetagenomicData::sampleMetadata,
+                       study_name %in% crc.ids &
+                       study_condition %in% c("control", "CRC")) 
+rownames(crc.metadata) <- NULL
+merged <- curatedMetagenomicData::returnSamples(crc.metadata, 
+                                                dataType = "relative_abundance",
+                                                counts = TRUE)
+merged
+```
+
+Annotate + DE analysis:
+
+```{r}
+merged$GROUP <- ifelse(merged$study_condition == "CRC", 1, 0)
+table(merged$GROUP)
+```
+
+Block by study to account for batch effects:
+
+```{r}
+merged$BLOCK <- merged$study_name
+assay(merged, "cpm") <- edgeR::cpm(assay(merged), log = TRUE, prior.count = 3) 
+merged <- EnrichmentBrowser::deAna(merged, assay = "cpm")
+merged <- merged[!is.na(rowData(merged)$species),]
+rownames(merged) <- rowData(merged)$species
+```
+
+ORA for merged dataset:
+
+```{r}
+merged.ora.res <- EnrichmentBrowser::sbea("ora", merged, sigs.species, perm = 0)
+merged.ora.res.tbl <- EnrichmentBrowser::gsRanking(merged.ora.res, signif.only = FALSE)
+merged.ora.res.tbl
+merged.ora.res.tbl$GENE.SET[1:25]
+```
+
+PADOG for merged dataset:
+
+```{r}
+merged.species.padog.res <- EnrichmentBrowser::sbea("padog", merged, sigs.species, assay = "cpm")
+merged.species.padog.res.tbl <- EnrichmentBrowser::gsRanking(merged.species.padog.res, signif.only = FALSE)
+merged.species.padog.res.tbl
+merged.species.padog.res.tbl$GENE.SET[1:25]
+```
+
+**Genus-level analysis**:
+
+```{r, warning = FALSE}
+altExps(merged) <- mia::splitByRanks(merged)
+merged.genus <- altExps(merged)$genus
+assay(merged.genus, "cpm") <- edgeR::cpm(assay(merged.genus),
+                                         log = TRUE,
+                                         prior.count = 3) 
+merged.genus <- EnrichmentBrowser::deAna(merged.genus, assay = "cpm")
+```
+
+```{r}
+merged.genus.ora.res <- EnrichmentBrowser::sbea("ora", merged.genus, sigs.genus, perm = 0)
+merged.genus.ora.res.tbl <- EnrichmentBrowser::gsRanking(merged.genus.ora.res, signif.only = FALSE)
+merged.genus.ora.res.tbl
+merged.genus.ora.res.tbl$GENE.SET[1:25]
+```
+
+PADOG for merged dataset:
+
+```{r}
+merged.genus.padog.res <- EnrichmentBrowser::sbea("padog", merged.genus, sigs.genus, assay = "cpm")
+merged.genus.padog.res.tbl <- EnrichmentBrowser::gsRanking(merged.genus.padog.res, signif.only = FALSE)
+merged.genus.padog.res.tbl
+merged.genus.padog.res.tbl$GENE.SET[1:25]
+```
+
+Visualize:
+
+```{r}
+res <- merged.genus.ora.res
+res.tbl <- merged.genus.ora.res.tbl
+
+# signature ID
+spl <- strsplit(res.tbl$GENE.SET, "_")
+id <- vapply(spl, `[`, character(1), x = 1)
+
+# signature name
+name <- vapply(spl, `[`, character(1), x = 2)
+name <- strsplit(name, ":")
+name <- vapply(name, `[`, character(1), x = 1)
+name <- gsub("-", " ", name)
+ud <- vapply(spl, `[`, character(1), x = 5)
+#name <- paste(name, ud, sep = "_")
+
+# nr of significant microbes
+is.sig <- EnrichmentBrowser:::.isSig(rowData(res$se))
+nr.sigs <- sum(is.sig)
+msigs <- rownames(res$se)[is.sig]
+gs <- res$gs[res.tbl$GENE.SET]
+gs <- lapply(gs, function(x) intersect(msigs, x))
+gsv <- vapply(gs, function(s) paste(s, collapse = "/"), character(1), USE.NAMES = FALSE)
+
+df <- data.frame(ID = id,
+                 Description = name,
+                 GeneRatio = paste(res.tbl$NR.SIG.GENES, res.tbl$NR.GENES, sep = "/"),
+                 BgRatio = paste(res.tbl$NR.GENES, nrow(res$se), sep = "/"),
+                 pvalue = res.tbl$PVAL,
+                 p.adjust = p.adjust(res.tbl$PVAL, method = "BH"),
+                 qvalue = p.adjust(res.tbl$PVAL, method = "BH"),
+                 geneID = gsv, 
+                 Count = res.tbl$NR.SIG.GENES) 
+
+df <- df[df$Description != "NA",]
+df[df$ID == "bsdb:43/1/2", "Description"] <- "Behcet's syndrome"
+df[df$ID == "bsdb:305/1/1", "Description"] <- "genital neoplasm, female"
+df[df$ID == "bsdb:455/4/1", "Description"] <- "gingivitis"
+
+x <- new("enrichResult", result = df, pvalueCutoff = 0.05, 
+        pAdjustMethod = "BH", qvalueCutoff = 1, 
+        gene = msigs, universe = rownames(res$se), geneSets = res$gs[res.tbl$GENE.SET], 
+        organism = "UNKNOWN", keytype = "UNKNOWN", ontology = "UNKNOWN", 
+        readable = FALSE)
+
+dotplot(x, showCategory=25) + ggplot2::xlab("proportion of significant taxa in signature")
+```
+
+Manual with additional annotations: 
+
+```{r}
+df <- fortify(x, showCategory = 25, split = NULL)
+df <- dplyr::mutate(df, x = eval(parse(text = "GeneRatio")))
+label_func <- enrichplot:::default_labeller(30)
+idx <- order(df[["x"]], decreasing = TRUE)
+df$Description <- factor(df$Description, levels = rev(unique(df$Description[idx])))
+df$label <- ""
+df <- df[-c(3,6,7),]
+df[c(1:5),"label"] <- c("Thomas2019*",
+                        "Wirbel2019*",
+                        "Wu2013", "",
+                        "Allali2018")
+df[1, "x"] <- df[1, "x"] + 0.02
+colnames(df) <- tolower(colnames(df))
+p1 <- ggplot(df, aes_string(x = "x", y = "description", size = "count", 
+        color = "p.adjust", label = "label")) + 
+        geom_point() + 
+        ggrepel::geom_text_repel(
+            #aes_string(point.size = "Count"),
+            color = "black", 
+            size = 3) + #,
+            #min.segment.length = 0,
+            #point.padding = 0,
+            #box.padding = 0.3) +
+        scale_color_continuous(low = "red", high = "blue", name = "p.adjust", 
+                               guide = guide_colorbar(reverse = TRUE)) + 
+        scale_y_discrete(labels = label_func) +
+        ggplot2::xlab("proportion of significant taxa in signature") +
+        ylab(NULL) + 
+        ggtitle("") + 
+        enrichplot:::theme_dose(12) + 
+        scale_size(range = c(3, 8))
+```
+
+# heatplot
+
+```{r, eval = TRUE}
+ind <- c(1:2, 4, 6, 10:20)
+top.gs <- gs[ind]
+ays <- c("Thomas2019*",
+         "Wirbel2019*",
+         "Wu2013", 
+         "Coit2016",
+         "Allali2018",
+         "Balan2021",
+         "Yang2018a",
+         "Yang2018b",
+         "Oku2020" ,
+         "Sato2020",
+         "Gong2014",
+         "Tsementzi2020",
+         "Cook2019",
+         "Correa2019",
+         "Ren2021")
+
+name[ind][c(4,6,12)] <- c("Behcet's syndrome", "gingivitis", "genital neoplasm, female")
+names(top.gs) <- paste(ays, name[ind], sep = ": ")
+
+heatplot2 <- function(top.gs, se, min.sigs = 3)
+{
+    # reshape input data for plotting
+    top.df <- stack(top.gs)
+    top.df$ind <- as.character(top.df$ind)
+    colnames(top.df) <- c("Taxon", "Signature")
+    top.df$FC <- rowData(se)[top.df$Taxon, "FC"]
+
+    # define taxon order (x-axis)
+    tt <- sort(table(top.df$Taxon), decreasing = TRUE)
+    top.df$Taxon <- factor(top.df$Taxon, levels = names(tt))
+
+    # define signature order (y-axis)
+    smat <- BugSigDBStats::calcJaccardSimilarity(top.gs)
+    jdist <- as.dist(1 - smat)
+    ord <- hclust(jdist, method = "complete")$order
+    top.df$Signature <- factor(top.df$Signature, levels = names(top.gs)[ord])
+
+    # plot
+    sigs.per.taxon <- table(top.df$Taxon)
+    ind <- sigs.per.taxon >= min.sigs
+    top.df <- subset(top.df, Taxon %in% names(sigs.per.taxon[ind]))
+    p <- ggplot(top.df, aes_(~Taxon, ~Signature)) + geom_tile(aes_(fill = ~FC), 
+            color = "white") + scale_fill_continuous(low = "blue", 
+            high = "red", name = "log2 fold change")
+    p + xlab(NULL) + ylab(NULL) + theme_minimal() +
+        #+ scale_y_discrete(labels = n) + 
+        theme(panel.grid.major = element_blank(), 
+              axis.text.x = element_text(angle = 60, hjust = 1, size = 11),
+              axis.text.y = element_text(size = 11))
+}
+
+heatplot2(top.gs, merged.genus)
+p2 <- heatplot2(top.gs, merged.genus)
+ggpubr::ggarrange(p1, p2, nrow = 2, labels = c("A", "B"))
+```
+
+**Approach 2: aggregate gene set rankings from both datasets**
+
+```{r}
+ora.all.res <- GSEABenchmarkeR::runEA(all.genus, "ora", sigs.genus, perm = 0)
+ora.all.res <- lapply(ora.all.res$ora, function(x) x$ranking)
+ora.rls <- lapply(ora.all.res, function(x) x$GENE.SET)
+ora.rra.res <- RobustRankAggreg::aggregateRanks(ora.rls)
+rownames(ora.rra.res) <- NULL
+head(data.frame(Name = substring(ora.rra.res$Name, 1, 50),
+           Score = ora.rra.res$Score), n = 25)
+ora.ranks <- lapply(ora.all.res, EnrichmentBrowser:::.getRanks) 
+ora.ranks <- vapply(ora.ranks, 
+                    function(x) x[ora.rra.res$Name],
+                    numeric(nrow(ora.rra.res)))
+ora.rra.res$Name <- substring(ora.rra.res$Name, 1, 50)
+rownames(ora.ranks) <- ora.rra.res$Name
+head(ora.ranks)
+ora.rra.res$mean.rank <- rowMeans(ora.ranks, na.rm = TRUE)
+ora.rra.res$sd <- rowSds(ora.ranks, na.rm = TRUE)
+ora.rra.res$fdr <- p.adjust(ora.rra.res$Score, method = "BH")
+head(ora.rra.res, n = 25)
+```
+
+```{r}
+par(las = 2)
+n <- strsplit(colnames(ora.ranks), "_")
+n <- vapply(n, `[`, character(1), x = 1)
+barplot(ora.ranks[1,], names = n, 
+        ylab = "rank", main = rownames(ora.ranks)[1])
+barplot(ora.ranks[2,], names = n, 
+        ylab = "rank", main = rownames(ora.ranks)[2])
+```
+
+```{r}
+for(i in seq_along(all.genus)) 
+{
+    n <- setdiff(colnames(colData(all.genus[[i]])), "BLOCK")
+    colData(all.genus[[i]]) <- colData(all.genus[[i]])[,n]
+}
+padog.all.res <- GSEABenchmarkeR::runEA(all.genus, "padog", sigs.genus, assay = "cpm")
+padog.all.res <- lapply(padog.all.res$padog, function(x) x$ranking)
+padog.rls <- lapply(padog.all.res, function(x) x$GENE.SET)
+padog.rra.res <- RobustRankAggreg::aggregateRanks(padog.rls)
+rownames(padog.rra.res) <- NULL
+head(data.frame(Name = substring(padog.rra.res$Name, 1, 50),
+           Score = padog.rra.res$Score), n = 25)
+padog.ranks <- lapply(padog.all.res, EnrichmentBrowser:::.getRanks) 
+padog.ranks <- vapply(padog.ranks, 
+                    function(x) x[padog.rra.res$Name],
+                    numeric(nrow(padog.rra.res)))
+padog.rra.res$Name <- substring(padog.rra.res$Name, 1, 50)
+rownames(padog.ranks) <- padog.rra.res$Name
+head(padog.ranks)
+padog.rra.res$mean.rank <- rowMeans(padog.ranks, na.rm = TRUE)
+padog.rra.res$sd <- rowSds(padog.ranks, na.rm = TRUE)
+padog.rra.res$fdr <- p.adjust(padog.rra.res$Score, method = "BH")
+head(padog.rra.res, n = 25)
+```
+
+```{r}
+par(las = 2)
+n <- strsplit(colnames(padog.ranks), "_")
+n <- vapply(n, `[`, character(1), x = 1)
+barplot(padog.ranks[1,], names = n, 
+        ylab = "rank", main = rownames(padog.ranks)[1])
+barplot(padog.ranks[2,], names = n, 
+        ylab = "rank", main = rownames(padog.ranks)[2])
+```
+
+Visualize:
+
+```{r}
+tag1 <- "bsdb:470/1/1"
+tag2 <- "bsdb:471/1/1"
+
+m <- cbind(ora.ranks[grep(tag1, rownames(ora.ranks)),],
+      ora.ranks[grep(tag2, rownames(ora.ranks)),],
+      padog.ranks[grep(tag1, rownames(padog.ranks)),],
+      padog.ranks[grep(tag2, rownames(padog.ranks)),])
+colnames(m) <- paste(rep(c("ora", "padog"), each = 2), rep(c(tag1, tag2), 2), sep = ".")
+rownames(m) <- sub("[A-Z]{1,2}_", "", rownames(m))
+ind <- c("Zeller2014", "Feng2015", "Yu2015", "Vogtmann2016", "Hannigan2017",
+         "Thomas2018a", "Thomas2018b", "Wirbel2018", "Yachida2019", "Gupta2019")
+m <- m[ind,] 
+rownames(m)[9:10] <- paste0(rownames(m)[9:10], "#")
+
+df <- reshape2::melt(m)
+colnames(df) <- c("Dataset", "Method", "value")
+spl <- strsplit(as.character(df$Method), "\\.")
+df$Method <- vapply(spl, `[`, character(1), x = 1)
+df$Signature <- vapply(spl, `[`, character(1), x = 2)
+df$Signature <- ifelse(df$Signature == "bsdb:470/1/1", 
+                       "spike-in: Wirbel2019*",
+                       "spike-in: Thomas2019*")
+col <- rev(get_palette(palette = "simpsons", 2))
+p3 <- ggline(df, x = "Dataset", y = "value", linetype = "Method", color = "Method", 
+       palette = "simpsons", ylab = "Rank [%]", xlab = "Dataset",
+       facet.by = "Signature", ggtheme = theme_bw()) + 
+       theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+# alternatively:
+ggboxplot(df, x = "Method", y = "value", fill = "Method", palette = "simpsons",
+         ylab = "Rank [%]", xlab = "Method", width = 0.8, add = "jitter",
+         facet.by = "Signature", ggtheme = theme_bw())
+```
+
+```{r, fig.width = 10}
+wilcox.test(m[,"ora.bsdb:470/1/1"], m[,"padog.bsdb:470/1/1"], paired = TRUE)
+wilcox.test(m[,"ora.bsdb:471/1/1"], m[,"padog.bsdb:471/1/1"], paired = TRUE)
+#ggarrange(ggarrange(p1, p3, ncol = 2, labels = c("A", "B")), p2, nrow = 2, labels = c("", "C"))
+ggarrange(p1, p3, ncol = 2, labels = c("A", "B"))
+```
+
+Relationship between sample size and ranking of spike-in signatures:
+
+```{r}
+s <- t(vapply(all, function(x) table(x$study_condition), integer(2)))
+rownames(s) <- sub("[A-Z]{1,2}_", "", rownames(s))
+s <- rowSums(s)
+s <- sort(s)
+s
+```
+
+```{r}
+rownames(m) <- sub("#", "", rownames(m))
+m
+```
+
+Spearman correlation test between sample size and enrichment ranks 
+displays a strong relationship, ie the larger the sample size the better
+the ranks of the spike-in signatures:
+
+```{r, warning = FALSE}
+cors <- cor(s, m[names(s),] , method = "spearman")
+cors
+ps <- apply(m[names(s),], 2, function(x) cor.test(s, x, method = "spearman")$p.value)
+ps
+```
+
+Make scatterplots:
+
+```{r, fig.width = 10}
+df$ssize <- s[as.character(df$Dataset)]
+ggpubr::ggscatter(df, x = "ssize", y = "value", shape = "Method", color = "Method", 
+                  palette = "simpsons", ylab = "Rank [%]", xlab = "Sample size", 
+                  label = "Dataset", repel = TRUE, font.label = c(9, "plain"),
+                  facet.by = c("Signature", "Method"), ggtheme = theme_bw()) + 
+                  stat_cor(method = "spearman", label.x.npc = "center")   
+```
+
+# CBEA (Competitive Balances for Taxonomic Enrichment Analysis)
+
+## Run CBEA on the pooled dataset
+
+Turn signatures into a `BiocSet`:
+
+```{r}
+bugsigdbr::writeGMT(sigs.genus, "sigs_genus.gmt")
+bs.genus <- BiocSet::import("sigs_genus.gmt")
+file.remove("sigs_genus.gmt")
+```
+
+Add a small pseudocount:
+
+```{r}
+mgenus <- merged.genus
+assay(mgenus, "relative_abundance") <- assay(mgenus, "relative_abundance") + 0.5
+```
+
+Remove elements (taxa) that are not part of the data set:
+
+```{r}
+bs.genus <- bs.genus %>% filter_elementset(element %in% rownames(mgenus))
+```
+
+Remove singleton sets:
+
+```{r}
+non.single <- bs.genus %>% es_elementset() %>% group_by(set) %>%
+                    tally() %>% filter(n >= 2) %>% pull(set)
+bs.genus <- bs.genus %>% filter_elementset(set %in% non.single)
+```
+
+```{r}
+res <- CBEA::cbea(obj = mgenus, set = bs.genus, output = "zscore",
+            abund_values = "relative_abundance", distr = "norm",
+            paramteric = TRUE, adj = TRUE, thresh = 0.05, n_perm = 100,
+            parallel_backend = BiocParallel::registered())
+```
+
+Obtain the results as a `data.frame`
+
+```{r}
+resm <- data.frame(tidy(res))
+rownames(resm) <- resm[,1]
+resm <- resm[,-1]
+resm <- t(resm)
+```
+
+Differential enrichment using limma
+
+```{r}
+group <- factor(mgenus$GROUP)
+blk <- mgenus$BLOCK
+f <- "~"
+block <- factor(blk)
+f <- paste0(f, "block + ")
+f <- formula(paste0(f, "group"))
+
+
+design <- model.matrix(f)
+fit <- limma::lmFit(resm, design)
+fit <- limma::eBayes(fit)
+aT1 <- limma::topTable(fit, number=nrow(resm), coef="group1", 
+                       sort.by="none", adjust.method="none")
+head(aT1[order(aT1$P.Value),])
+```
+
+## Run CBEA on each dataset individually
+
+```{r}
+runCBEA <- function(se, gs)
+{
+    library(CBEA)
+    library(BiocSet)
+    # turn the signatures into a BiocSet
+    bugsigdbr::writeGMT(gs, "gs.gmt")
+    gs <- BiocSet::import("gs.gmt")
+    file.remove("gs.gmt")
+
+    # restrict to element in the data
+    gs <- gs %>% filter_elementset(element %in% rownames(se))
+
+    # remove singleton sets
+    non.single <- gs %>% es_elementset() %>% group_by(set) %>%
+                    tally() %>% filter(n >= 2) %>% pull(set)
+    gs <- gs %>% filter_elementset(set %in% non.single)
+
+    # run cbea
+    res <- cbea(obj = se, set = gs, output = "zscore",
+            abund_values = "relative_abundance", distr = "norm",
+            paramteric = TRUE, adj = TRUE, thresh = 0.05, n_perm = 100,
+            parallel_backend = BiocParallel::registered())
+
+    # obtain the results as a data.frame
+    resm <- data.frame(tidy(res))
+    rownames(resm) <- resm[,1]
+    resm <- resm[,-1]
+    resm <- t(resm)
+
+    # differential enrichment using limma
+    group <- factor(se$GROUP)
+    f <- formula("~group")
+    design <- model.matrix(f)
+    fit <- limma::lmFit(resm, design)
+    fit <- limma::eBayes(fit)
+    res <- limma::topTable(fit, number=nrow(resm), coef="group1", 
+                           sort.by="none", adjust.method="none")
+    res <- res[,c("logFC", "t", "P.Value")]
+    colnames(res)[2:3] <- c("t.SCORE", EnrichmentBrowser::configEBrowser("PVAL.COL"))
+    return(res)
+}
+```
+
+Apply to all 10 datasets:
+
+```{r}
+# cbea.all.res <- GSEABenchmarkeR::runEA(all.genus, runCBEA, sigs.genus)
+cbea.all.res <- lapply(all.genus,
+                       EnrichmentBrowser::sbea,
+                       gs = sigs.genus,
+                       method = runCBEA)
+
+cbea.all.res <- lapply(cbea.all.res, 
+                       EnrichmentBrowser::gsRanking,
+                       signif.only = FALSE)
+cbea.ranks <- lapply(cbea.all.res, EnrichmentBrowser:::.getRanks) 
+```
+
+Check for spike-in signatures:
+
+```{r}
+cbea.470.1.1 <- vapply(cbea.ranks, function(r) r[grep("^bsdb.470.1.1",names(r))], numeric(1))
+names(cbea.470.1.1) <- sub("[A-Z]+_", "", names(cbea.470.1.1))
+all(names(cbea.470.1.1) %in% rownames(m))
+cbea.470.1.1 <- cbea.470.1.1[rownames(m)]
+```
+
+```{r}
+cbea.471.1.1 <- vapply(cbea.ranks, function(r) r[grep("^bsdb.471.1.1",names(r))], numeric(1))
+names(cbea.471.1.1) <- sub("[A-Z]+_", "", names(cbea.471.1.1))
+all(names(cbea.471.1.1) %in% rownames(m))
+cbea.471.1.1 <- cbea.471.1.1[rownames(m)]
+```
+
+Append to ORA and PADOG results:
+
+```{r}
+m <- cbind(m, cbea.470.1.1, cbea.471.1.1)
+colnames(m)[5:6] <- c("cbea.bsdb:470/1/1", "cbea.bsdb:471/1/1")
+```
+
+Plot as before (good palettes: nejm / lancet / npg):
+
+```{r}
+df <- reshape2::melt(100 - m)
+colnames(df) <- c("Dataset", "Method", "value")
+spl <- strsplit(as.character(df$Method), "\\.")
+df$Method <- vapply(spl, `[`, character(1), x = 1)
+df$Signature <- vapply(spl, `[`, character(1), x = 2)
+df$Signature <- ifelse(df$Signature == "bsdb:470/1/1", 
+                       "spike-in: Wirbel2019*",
+                       "spike-in: Thomas2019*")
+col <- rev(get_palette(palette = "simpsons", 3))
+ssize <- s[as.character(df$Dataset)]
+ins <- ifelse(names(s) %in% c("Gupta2019", "Yachida2019"), "#", "")
+slev <- paste0(names(s), ins, " (", unname(s), ")")
+ins <- ifelse(df$Dataset %in% c("Gupta2019", "Yachida2019"), "#", "")
+df$Dataset <- paste0(df$Dataset, ins, " (", ssize, ")")
+df$Dataset <- factor(df$Dataset, levels = slev)
+df$Method <- factor(df$Method, levels = c("ora", "padog", "cbea"))
+p3 <- ggline(df, x = "Dataset", y = "value", linetype = "Method", color = "Method", 
+       palette = "igv", ylab = "Rank [%]", xlab = "Dataset (Sample size)",
+       facet.by = "Signature", ggtheme = theme_bw()) + 
+       theme(axis.text.x = element_text(angle = 60, hjust = 1))
+p3
+```
+
+Test for differences in ranking:
+
+```{r}
+wilcox.test(m[,"ora.bsdb:470/1/1"], m[,"cbea.bsdb:470/1/1"], paired = TRUE)
+wilcox.test(m[,"padog.bsdb:470/1/1"], m[,"cbea.bsdb:470/1/1"], paired = TRUE)
+wilcox.test(m[,"ora.bsdb:471/1/1"], m[,"cbea.bsdb:471/1/1"], paired = TRUE)
+wilcox.test(m[,"padog.bsdb:471/1/1"], m[,"cbea.bsdb:471/1/1"], paired = TRUE)
+```
+
+```{r, warning = FALSE}
+my_comparisons <- list(c("padog", "ora"), c("cbea", "ora"), c("cbea", "padog"))
+p4 <- ggboxplot(df, x = "Method", y = "value", fill = "Method", palette = "igv",
+                ylab = "Rank [%]", xlab = "Method", width = 0.8, add = "jitter",
+                facet.by = "Signature", ggtheme = theme_bw(), legend = "none")#,
+                #font.tickslab = c(10, "plain", "black"))
+p4 <- p4 + stat_compare_means(comparisons = my_comparisons,
+                              method = "wilcox.test",
+                              paired = TRUE)
+p4
+```
+
+Putting it all together:
+
+```{r, fig.width = 10, fig.height = 10, warning = FALSE}
+p12 <- ggarrange(p1, p2, ncol = 2, labels = c("A", "B"))
+p34 <- ggarrange(p3, p4, ncol = 2, labels = c("C", "D"))
+#png("Figure3.png", res = 300, width = 2000, height = 2000)
+ggarrange(p12, p34, nrow = 2)
+#dev.off()
+```
+
