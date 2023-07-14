@@ -1,0 +1,689 @@
+---
+title: Figure 2. Signature similarity
+vignette: >
+  % \VignetteIndexEntry{Signature similarity}
+  % \VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %e, %Y")`'
+output:
+  html_document:
+    mathjax: null   
+---
+
+Setup:
+
+```{r, message = FALSE}
+library(aplot)
+library(bugsigdbr)
+library(BugSigDBStats)
+library(ComplexHeatmap)
+library(ggpubr)
+library(ggplotify)
+library(ggtree)
+library(ontologySimilarity)
+```
+
+# Helper functions
+
+Function to pull out author and year of publication from a signature name:
+
+```{r}
+.getAuthorYear <- function(dat, sname)
+{
+    stopifnot(length(sname) == 1 && is.character(sname))
+    id <- unlist(strsplit(sname, "_"))[1]
+    stopifnot(grepl("^bsdb:", id))
+    id <- sub("^bsdb:", "", id)
+    id <- unlist(strsplit(id, "/"))
+    sdat <- subset(dat, Study == paste0("Study ", id[1]) &
+                        Experiment == paste0("Experiment ", id[2]) &
+                        `Signature page name` == paste0("Signature ", id[3]))
+    author <- sdat$Authors
+    aspl <- unlist(strsplit(author, " "))[1]
+    year <- sdat$Year
+    cond <- sdat$Condition
+    ay <- paste0(aspl, year)
+    ay <- paste(ay, cond, sep = "_")
+    return(ay)
+}
+```
+
+Function to build a short name for a signature name:
+
+```{r}
+.getShortName <- function(sname)
+{
+    stopifnot(grepl("^bsdb:", sname))
+    spl <- unlist(strsplit(sname, ":"))
+    paste(spl[1], spl[2], sep = ":")
+}
+```
+
+Function to parse out condition from signature names:
+
+```{r}
+.getCondition <- function(sigs)
+{
+    spl <- strsplit(sigs, "_")
+    spl <- vapply(spl, `[`, character(1), x = 2)
+    spl <- strsplit(spl, ":")
+    spl <- vapply(spl, `[`, character(1), x = 1)
+    return(spl)
+}
+```
+
+Function to parse out direction from signature names:
+
+```{r}
+.getDirection <- function(sigs)
+{
+    spl <- strsplit(sigs, "_")
+    spl <- vapply(spl, function(x) x[length(x)], character(1))
+    return(spl)
+}
+```
+
+# Obtain the data
+
+```{r}
+dat <- bugsigdbr::importBugSigDB(version = "10.5281/zenodo.5904281", cache = FALSE)
+onto <- BugSigDBStats::getNcbiTaxonomyObo()
+# onto <- ontologyIndex::get_ontology("http://purl.obolibrary.org/obo/ncbitaxon.obo")
+```
+
+# Semantic similarity on mixed taxonomic levels
+
+First we look at the overall signature similarity matrix with a PCA/PCoA:
+
+```{r}
+ind <- lengths(dat[["NCBI Taxonomy IDs"]]) > 4
+sub.dat <- dat[ind,]
+sigs <- bugsigdbr::getSignatures(sub.dat, tax.id.type = "ncbi")
+sigs <- BugSigDBStats::syncWithNCBI(sigs, onto)
+sim.mat <- ontologySimilarity::get_sim_grid(ontology = onto, term_sets = sigs)
+dist.mat <- stats::as.dist(1 - sim.mat)
+res <- stats::cmdscale(dist.mat)
+```
+
+Now let's focus on fecal samples and signatures with at least 5 taxa.
+
+```{r}
+dat.feces <- subset(dat, `Body site` == "feces")
+ind <- lengths(dat.feces[["NCBI Taxonomy IDs"]]) > 4
+dat.feces <- dat.feces[ind,]
+```
+
+Pull out signatures based on NCBI Taxonomy IDs:
+
+```{r}
+sigs <- bugsigdbr::getSignatures(dat.feces, tax.id.type = "ncbi")
+sigs <- BugSigDBStats::syncWithNCBI(sigs, onto) 
+```
+
+Compute semantic similarity:
+
+```{r}
+sim.mat <- ontologySimilarity::get_sim_grid(ontology = onto, term_sets = sigs)
+sim.mat[1:5,1:5]
+```
+
+# Hierarchical clustering on the semantic similarity matrix
+
+```{r}
+hc <- stats::hclust(stats::as.dist(1 - sim.mat), method = "ward.D")
+clus <- stats::cutree(hc, 5)
+head(clus)
+d <- data.frame(label = names(clus), count = lengths(sigs[names(clus)]))
+head(d)
+```
+
+# Jaccard matrix on genus level
+
+```{r}
+sigs.genus <- bugsigdbr::getSignatures(dat.feces,
+                                       #tax.id.type = "metaphlan",
+                                       tax.id.type = "taxname", 
+                                       tax.level = "genus",
+                                       exact.tax.level = FALSE)
+jmat <- BugSigDBStats::calcJaccardSimilarity(sigs.genus)
+```
+
+Correlation between semantic similarity and Jaccard similarity:
+
+```{r}
+.fcor <- function(i) cor(jmat[i,], sim.mat[rownames(jmat)[i], colnames(jmat)])
+cors <- vapply(seq_len(nrow(jmat)), .fcor, numeric(1))
+summary(cors)
+```
+
+# Heatmap comparison
+
+Color ramp from 0.01 quantile to 0.99 quantile
+
+```{r, fig.width = 10, fig.height = 10}
+quantile(as.vector(sim.mat), 0.01)
+quantile(as.vector(sim.mat), 0.99)
+col2 <- circlize::colorRamp2(c(0,0.8012), c("#EEEEEE", "red"))
+
+h2 <- ComplexHeatmap::Heatmap(sim.mat[rownames(jmat),rownames(jmat)], 
+                              name = "semsim",
+                              col = col2,
+                              #column_km = 5,
+                              #row_km = 6,
+                              row_title = "signatures",
+                              column_title = "signatures",
+                              show_row_names=FALSE,
+                              show_column_names=FALSE)
+
+col <- circlize::colorRamp2(c(0,1/3), c("#EEEEEE", "red"))
+h1 <- Heatmap(jmat[,column_order(h2)], 
+              col = col,
+              cluster_columns = FALSE,
+              show_row_names = FALSE,
+              show_column_names = FALSE,
+              name = "jaccard")
+
+h2 + h1
+```
+
+Zoom into a cluster:
+
+```{r}
+h2 <- draw(h2)
+ro <- ComplexHeatmap::row_order(h2)
+rd <- ComplexHeatmap::row_dend(h2)
+str(rd, max.level = 2)
+```
+
+Cut dendrogram at specified height ...
+```{r}
+hd <- cut(rd, 2.90)
+par(mar = c(0,0,4,20))
+par(cex = 0.5)
+plot(hd$lower[[1]], horiz = TRUE)
+```
+
+... or specified number of clusters:
+
+```{r}
+##  for hierarchical clustering
+clus <- stats::cutree(as.hclust(rd), 5) 
+
+## for k-means
+#clus <- rep(seq_along(ro), lengths(ro))  
+#names(clus) <- rownames(sim.mat)[unlist(ro)]
+```
+
+# Test each cluster for over-representation of a condition 
+
+```{r}
+cond <- .getCondition(names(clus))
+tab <- table(cond) # background
+spl <- split(cond, clus) # numbers per cluster
+spl <- lapply(spl, table) # numbers per cluster
+smat <- vapply(spl, function(x) x[names(tab)], integer(length(tab)))
+smat[is.na(smat)] <- 0
+rownames(smat) <- names(tab)
+rs <- rowSums(smat)
+cs <- colSums(smat)
+total <- sum(tab)
+```
+
+Function for constructing 2x2 contingency table for one condition and one cluster at a time:
+
+```{r}
+getContingency <- function(co, cl, m, rs, cs, total) 
+{
+    both <- m[co,cl]
+    one <- rs[co] - both
+    two <- cs[cl] - both
+    all <- total - one - two - both
+    unname(c(both, two, one, all))
+}
+
+getContingency("COVID-19", 2, smat, rs, cs, total)
+```
+
+Build all condition/cluster combinations for testing:
+
+```{r}
+combs <- expand.grid(rownames(smat), seq_len(ncol(smat)))
+conts <- apply(combs, 1, function(x) getContingency(x[1], x[2], smat, rs, cs, total)) 
+conts <- t(conts)
+rownames(conts) <- apply(combs, 1, function(x) paste(x, collapse = "."))
+ind <- conts[,1] > 4
+conts <- conts[ind,]
+combs <- combs[ind,]
+```
+
+Test for over-representation using Fisher's exact test:
+
+```{r}
+fisherp <- function(x) fisher.test(matrix(x, nrow = 2), 
+                       alternative = "greater")$p.value 
+ps <- apply(conts, 1, fisherp)
+adjp <- p.adjust(ps, method = "BH")
+res <- data.frame(condition = combs[,1], 
+                  cluster = combs[,2],
+                  PVAL = ps,
+                  ADJ.PVAL = adjp)
+res <- res[order(ps),]
+head(res, n = 10)
+```
+
+# Test each condition for semantic similarity
+
+```{r}
+dir <- .getDirection(rownames(sim.mat))
+cond <- .getCondition(rownames(sim.mat))
+ays <- vapply(rownames(sim.mat), .getAuthorYear, character(1), dat = dat) 
+ays <- strsplit(unname(ays), "_")
+ays <- vapply(ays, `[`, character(1), x = 1)
+```
+
+Select conditions studied in at least two studies:
+
+```{r}
+spl <- split(ays, cond)
+spl <- lapply(spl, unique)
+lens <- lengths(spl)
+names(lens) <- names(spl)
+lens <- sort(lens, decreasing = TRUE)
+conds.to.test <- names(lens)[lens > 1] # 36 conditions
+```
+
+Function for testing signatures of a condition of interest:
+
+```{r}
+.testCondition <- function(condition, sim.mat, direction = "UP")
+{
+    ind <- which(cond == condition & dir == direction)
+    if(length(ind) < 2) res <- c(sim = NA, p = NA)
+    else res <- c(sim = ontologySimilarity::get_sim(sim.mat, group = ind),
+                  p = ontologySimilarity::get_sim_p(sim.mat, group = ind))
+    return(res)
+}
+```
+
+```{r}
+ps.up <- vapply(conds.to.test, .testCondition, numeric(2), sim.mat = sim.mat)
+ps.up <- t(ps.up)
+ps.up <- ps.up[!is.na(ps.up[,"p"]),]
+ps.up <- ps.up[order(ps.up[,"p"]),]
+df.up <- data.frame(CONDITION = rownames(ps.up), 
+                    SEMSIM = ps.up[,"sim"],
+                    PVAL = ps.up[,"p"],
+                    NR.STUDIES = lens[rownames(ps.up)])
+df.up
+ps.down <- vapply(conds.to.test, .testCondition, numeric(2), sim.mat, direction = "DOWN")
+ps.down <- t(ps.down)
+ps.down <- ps.down[!is.na(ps.down[,"p"]),]
+ps.down <- ps.down[order(ps.down[,"p"]),]
+df.down <- data.frame(CONDITION = rownames(ps.down), 
+                    SEMSIM = ps.down[,"sim"],
+                    PVAL = ps.down[,"p"],
+                    NR.STUDIES = lens[rownames(ps.down)])
+df.down
+```
+
+Plot top consistent up and down conditions:
+
+```{r}
+isect <- intersect(rownames(df.up), rownames(df.down))
+top.df <- cbind(df.up[isect,], df.down[isect,])
+EnrichmentBrowser::configEBrowser("GS.COL", "CONDITION")
+uranks <- EnrichmentBrowser:::.getRanks(df.up)
+dranks <- EnrichmentBrowser:::.getRanks(df.down)
+mranks <- (uranks[isect] + dranks[isect]) / 2 
+ind <- order(mranks[rownames(top.df)])
+top.df <- top.df[ind,]
+colnames(top.df)[c(2:4,6:8)] <- paste(colnames(top.df)[c(2:4,6:8)], 
+                                      rep(c("UP", "DOWN"), each = 3), 
+                                      sep = ".") 
+```
+
+```{r}
+df <- data.frame(CONDITION = rep(rownames(top.df), 2),
+                 PVAL = -log10(c(top.df$PVAL.UP, top.df$PVAL.DOWN)), 
+                 NR.STUDIES = c(top.df$NR.STUDIES.UP, top.df$NR.STUDIES.DOWN),   
+                 DIRECTION = rep(c("Increased", "Decreased"), each = nrow(top.df)))
+df <- df[c(1:20,30:49),]
+df$CONDITION <- factor(df$CONDITION, levels = rev(df$CONDITION[1:20]))
+df$DIRECTION <- factor(df$DIRECTION, levels = c("Increased", "Decreased"))
+```
+
+```{r, fig.height = 8}
+dotp <- ggplot(df, aes_string(x = "PVAL", y = "CONDITION",
+                              size = "NR.STUDIES", color = "PVAL")) + 
+        geom_point() +
+        scale_color_continuous(low = "grey", high = "red", name = "-log10(P)", 
+                               guide = guide_colorbar(reverse = TRUE)) +
+        scale_y_discrete(labels = enrichplot:::default_labeller(30)) +
+        ggplot2::xlab("-log10(P)") +
+        ggplot2::ylab(NULL) +
+        ggplot2::ggtitle("") +
+        enrichplot:::theme_dose() + 
+        scale_size(range = c(3, 8)) +
+        facet_wrap(vars(DIRECTION), ncol = 2)
+dotp
+```
+
+# Test replicability across body sites
+
+Get the data:
+
+```{r}
+df <- bugsigdbr::importBugSigDB(version = "10.5281/zenodo.5904281")
+onto <- BugSigDBStats::getNcbiTaxonomyObo()
+```
+
+```{r}
+ind <- !is.na(dat[["Body site"]]) & dat[["Body site"]] == "posterior fornix of vagina"
+dat[ind, "Body site"] <- "vagina"
+ind <- !is.na(dat$Condition) & dat$Condition == "eczema"
+dat[ind, "Condition"] <- "atopic eczema"
+res <- BugSigDBStats::testReplicability(dat,
+                                        onto = onto,
+                                        multi.contrast = "merge")
+```
+
+```{r}
+res <- res[order(res$PVAL),]
+top25 <- res[1:25,]
+top25s <- paste(top25$CONDITION, top25[["BODY.SITE"]], sep = "-")
+top25s <- unique(top25s) 
+top25s <- c(paste(top25s, "UP", sep = "-"), paste(top25s, "DOWN", sep = "-"))
+top25r <- paste(res$CONDITION, res[["BODY.SITE"]], res$DIRECTION, sep = "-")
+top.df <- res[top25r %in% top25s,]
+```
+
+```{r}
+top.df$CONDITION <- gsub("glandular intraepithelial", "", top.df$CONDITION)
+top.df$CONDITION <- gsub("human papilloma virus", "HPV", top.df$CONDITION)
+top.df$CONDITION <- gsub(" mellitus", "", top.df$CONDITION)
+top.df[["BODY.SITE"]] <- gsub(" of body", "", top.df[["BODY.SITE"]])
+top.df[["BODY.SITE"]] <- gsub("ine cervix", "us", top.df[["BODY.SITE"]])
+top.df$PVAL <- -log10(top.df$PVAL)
+```
+
+```{r}
+top.df$CONDITION <- paste0(top.df$CONDITION, " (", top.df[["BODY.SITE"]], ")") 
+top.df$CONDITION <- factor(top.df$CONDITION, levels = rev(unique(top.df$CONDITION[1:25])))
+top.df$DIRECTION <- factor(top.df$DIRECTION, levels = c("DOWN", "UP"))
+top.df$DIRECTION <- ifelse(top.df$DIRECTION == "DOWN", "Decreased", "Increased")
+top.df$DIRECTION <- factor(top.df$DIRECTION, levels = c("Decreased", "Increased"))
+```
+
+```{r, fig.height = 8}
+dotp <- ggplot(top.df, aes_string(x = "PVAL", y = "CONDITION",
+                              size = "NR.STUDIES", color = "PVAL")) + 
+        geom_point() +
+        scale_color_continuous(low = "grey", high = "red", name = "-log10(P)", 
+                               guide = guide_colorbar(reverse = TRUE)) +
+        scale_y_discrete(labels = enrichplot:::default_labeller(30)) +
+        ggplot2::xlab("-log10(P)") +
+        ggplot2::ylab(NULL) +
+        ggplot2::ggtitle("") +
+        enrichplot:::theme_dose() + 
+        scale_size(range = c(3, 8), breaks = seq(5,30, by = 5)) +
+        facet_wrap(vars(DIRECTION), ncol = 2)
+dotp
+```
+
+Take a closer look at antibiotics and HIV infection:
+
+Parameterization:
+
+```{r}
+multi.contrast <- "merge"
+min.taxa <- 5
+```
+
+Sanity checks:
+
+```{r}
+stopifnot("Condition" %in% colnames(df))
+stopifnot("Body site" %in% colnames(df))
+stopifnot("NCBI Taxonomy IDs" %in% colnames(df))
+if(!is.null(onto)) stopifnot(is(onto, "ontology_index"))
+```
+
+Clean pmid, condition, and body site:
+
+```{r}
+rel.cols <- c("PMID", "Condition", "Body site") 
+for(column in rel.cols)
+{
+    ind <- !is.na(df[[column]]) & !grepl(",", df[[column]])
+    df <- df[ind,]
+}
+```
+
+```{r}
+multi.bs <- length(unique(df[["Body site"]])) > 1
+if(multi.bs) df$Condition <- paste(df$Condition, df[["Body site"]], sep = "*;*")
+```
+
+Treat multi contrast studies:
+
+```{r}
+df.up <- BugSigDBStats:::.restrictByDirection(df, direction = "UP")
+df.down <- BugSigDBStats:::.restrictByDirection(df, direction = "DOWN")
+df.up <- BugSigDBStats:::.treatMultiContrastStudies(df.up, multi.contrast)
+df.down <- BugSigDBStats:::.treatMultiContrastStudies(df.down, multi.contrast)
+df <- rbind(df.up, df.down)
+```
+
+```{r}
+ind <- lengths(df[["NCBI Taxonomy IDs"]]) >= min.taxa
+df <- df[ind,]
+```
+
+Calculate semantic similarity:
+
+```{r}
+sigs <- bugsigdbr::getSignatures(df, tax.id.type = "ncbi")
+sigs <- BugSigDBStats::syncWithNCBI(sigs, onto)
+sim.mat <- ontologySimilarity::get_sim_grid(ontology = onto, term_sets = sigs)
+```
+
+Get condition and direction of abundance change for each signature:
+
+```{r}
+cond <- .getCondition(names(sigs))
+dir <- .getDirection(names(sigs))
+```
+
+Get authors and publication year for each signature:
+
+```{r}
+ays <- vapply(rownames(sim.mat), .getAuthorYear, character(1), dat = df)
+ays <- strsplit(unname(ays), "_")
+ays <- vapply(ays, `[`, character(1), x = 1)
+head(ays)
+```
+
+Select signatures with decreased abundance upon antibiotics treatment:
+
+```{r}
+ind <- cond == "antimicrobial-agent*;*feces" & dir == "DOWN"
+table(ind)
+```
+
+Get genus level signatures with taxname only for visualization purposes:
+
+```{r}
+sigs.genus <- bugsigdbr::getSignatures(df,
+                                       tax.id.type = "taxname",
+                                       tax.level = "genus",
+                                       exact.tax.level = FALSE,
+                                       min.size = 0)
+```
+
+Get also full metaphlan strings for analysis purposes:
+
+```{r}
+sigs.mp <- bugsigdbr::getSignatures(df, tax.id.type = "metaphlan", min.size = 0)
+```
+
+Get signature by genus incidence matrix: 
+
+```{r}
+psigs.mp <- sigs.mp[ind]
+cmat <- safe::getCmatrix(psigs.mp, as.matrix = TRUE, min.size = 0, prune = FALSE)
+```
+
+Create signature labels for plotting:
+
+```{r}
+n <- c("infant:ampicillin+gentamicin",
+       "elderly:antimicrobial-agent",
+       "adult:GSK1322322",
+       "adult:ciprofloxacin/clindamycin",
+       "adult:moxifloxacin",
+       "infant:prenatal-antibiotics",
+       "infant:amoxicillin/penicillin",
+       "infant:prenatal-antibiotics")
+```
+
+```{r}
+psigs <- sigs.genus[ind]
+smat <- sim.mat[ind,ind]
+s <- strsplit(names(psigs), "_")
+s <- vapply(s, `[`, character(1), x = 1)
+s
+```
+
+```{r}
+aysn <- ays[ind]
+aysn <- sub("de", "Gunzburg", aysn)
+aysn <- paste(aysn, n, sep = "-")
+```
+
+```{r}
+names(psigs) <- rownames(smat) <- colnames(smat) <- aysn
+hc <- stats::hclust(stats::as.dist(1 - smat), method = "ward.D")
+freq <- table(unlist(psigs)) / length(psigs)
+ddf <- data.frame(frequency = as.vector(freq))
+rownames(ddf) <- names(freq)
+```
+
+Plot genus-level matrix:
+
+```{r, fig.width = 10, fig.height = 10}
+heatp1 <- EnrichmentPlotter::heatSimPlot(psigs, smat, ddf, "frequency") %>% 
+          insert_left(ggtree(hc), width = 0.2)
+heatp1
+```
+
+And network plot:
+
+```{r}
+np1 <- EnrichmentPlotter::networkSimPlot(psigs, smat, min.sim = 0.7)
+np1
+```
+
+```{r}
+snames <- c("Rashid2015", "Arat2015", "Gunzburg2018", "Zhang2019",
+            "Coker2020", "Zou2018", "O'Sullivan2013", "Fouhy2012",
+            "Laubitz2021")
+```
+
+Plot full taxon matrix:
+
+```{r, fig.width = 10, fig.height = 10}
+col.fun <- circlize::colorRamp2(c(0, 1), c("white", "black"))
+spl <- strsplit(aysn, "-")
+spl <- vapply(spl, `[`, character(1), x = 1)
+colnames(cmat) <- spl
+rownames(cmat) <- sub("k__Bacteria\\|", "", rownames(cmat))
+ComplexHeatmap::Heatmap(cmat[,snames],
+                        col = col.fun,
+                        cluster_rows = FALSE,
+                        cluster_columns = FALSE,
+                        row_names_gp = gpar(fontsize = 7),
+                        column_names_gp = gpar(fontsize = 8),
+                        row_names_max_width = unit(15, "cm"),
+                        show_heatmap_legend = FALSE)
+```
+
+Select signatures with decreased abundance upon HIV-infection:
+
+```{r}
+ind <- cond == "HIV-infection*;*feces" & dir == "DOWN"
+table(ind)
+```
+Get signature by genus incidence matrix: 
+
+```{r}
+psigs.mp <- sigs.mp[ind]
+cmat <- safe::getCmatrix(psigs.mp, as.matrix = TRUE, min.size = 0, prune = FALSE)
+```
+
+Create signature labels for plotting:
+
+```{r}
+n <- c("adult:HIV-infection",
+       "adult:HIV-infection",
+       "adult:HIV-infection",
+       "children:perinatal-HIV-infection",
+       "children:perinatal-HIV-infection")
+```
+
+```{r}
+psigs <- sigs.genus[ind]
+smat <- sim.mat[ind,ind]
+s <- strsplit(names(psigs), "_")
+s <- vapply(s, `[`, character(1), x = 1)
+s
+```
+
+```{r}
+aysn <- ays[ind]
+aysn <- paste(aysn, n, sep = "-")
+aysn
+```
+
+```{r}
+names(psigs) <- rownames(smat) <- colnames(smat) <- aysn
+hc <- stats::hclust(stats::as.dist(1 - smat), method = "ward.D")
+freq <- table(unlist(psigs)) / length(psigs)
+ddf <- data.frame(frequency = as.vector(freq))
+rownames(ddf) <- names(freq)
+```
+
+Plot genus-level matrix:
+
+```{r, fig.width = 10, fig.height = 10}
+heatp2 <- EnrichmentPlotter::heatSimPlot(psigs, smat, ddf, "frequency") %>% 
+          insert_left(ggtree(hc), width = 0.2)
+heatp2
+```
+
+And network plot:
+
+```{r}
+np2 <- EnrichmentPlotter::networkSimPlot(psigs, smat, min.sim = 0.5)
+np2
+```
+
+```{r}
+snames <- c("McHardy2013", "Ling2016", "Zhou2018", "Kaur2018", "Moya2020")
+```
+
+Plot full taxon matrix:
+
+```{r, fig.width = 10, fig.height = 10}
+col.fun <- circlize::colorRamp2(c(0, 1), c("white", "black"))
+spl <- strsplit(aysn, "-")
+spl <- vapply(spl, `[`, character(1), x = 1)
+colnames(cmat) <- spl
+ComplexHeatmap::Heatmap(cmat[,snames],
+                        col = col.fun,
+                        cluster_rows = FALSE,
+                        cluster_columns = FALSE,
+                        row_names_gp = gpar(fontsize = 7),
+                        column_names_gp = gpar(fontsize = 8),
+                        row_names_max_width = unit(14, "cm"),
+                        show_heatmap_legend = FALSE)
+```

@@ -1,0 +1,201 @@
+---
+title: Figure 1. BugSigDB overview
+vignette: >
+  % \VignetteIndexEntry{Figure 1}
+  % \VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %e, %Y")`'
+output:
+  html_document:
+    mathjax: null   
+---
+
+Setup:
+
+```{r setup, message=FALSE, warning=FALSE}
+library(bugsigdbr)
+library(ggpubr)
+library(lubridate)
+library(BugSigDBStats)
+library(ComplexHeatmap)
+```
+
+Panel A: curation output over time
+
+```{r}
+dat <- bugsigdbr::importBugSigDB(version = "10.5281/zenodo.5904281", cache = FALSE)
+dat[,"Curated date"] <- as.character(lubridate::dmy(dat[,"Curated date"]))
+dbm <- BugSigDBStats::plotProgressOverTime(dat)
+df <- reshape2::melt(dbm)
+df$Var1 <- ifelse(df$Var1 == "cdbm", "signatures", "papers")
+
+p <- ggbarplot(df, x = "Var2", y = "value", fill = "Var1", 
+               color = "Var1", palette = "Paired",
+               position = position_dodge(0.9), orientation = "horiz",
+               ggtheme = theme_bw(), legend = "top", xlab = "", ylab = "",
+               legend.title = "")
+```
+
+Panel B and C: papers per country and body site
+
+```{r}
+ppc <- BugSigDBStats::paperStat(dat, "Location of subjects")
+p1 <- BugSigDBPaper::plotStatsPerCountry(ppc, fixed = FALSE)
+bbc <- BugSigDBStats::paperStat(dat, "Body site")
+p2 <- BugSigDBPaper::plotStatsPerBodySite(bbc, sex = "female") + 
+      theme(legend.position = "none")
+```
+
+Arrange panels A-C:
+
+```{r}
+p12 <- ggarrange(p, p1, p2, widths = c(1.5, 2.5, 1),
+                 labels = c("A", "B", "C"), ncol = 3)
+```
+
+Panel D: most frequent taxa
+
+```{r}
+msc <- bugsigdbr::getSignatures(dat, tax.id.type = "metaphlan")
+(nuniq <- length(unique(unlist(msc))))
+msc.tab <- BugSigDBStats::getMostFrequentTaxa(dat, nuniq, tax.id.type = "metaphlan")
+msc.tab[5] <- msc.tab[5] + 5
+msc.tab[8] <- msc.tab[8] - 5
+msc.tab[10] <- msc.tab[10] - 8
+df.text <- data.frame(x = as.vector(msc.tab)[1:10], y = 1, label = names(msc.tab)[1:10])
+ggp <- gghistogram(as.vector(msc.tab), bins = 20,
+            xlab = "number of signatures",
+            ylab = "number of microbes",
+            fill = "#00AFBB", 
+            ggtheme = theme_bw()) + 
+            theme(axis.title = element_text(size = 10))
+p4 <- ggp + geom_text(data = df.text,
+                aes(x = x, y = y, label = label),
+                angle = 90, hjust = 0, nudge_y = 5, size = 3)
+```
+
+Panel E: microbe set size
+
+```{r}
+p5 <- gghistogram(lengths(msc), bins = 30, ylab="number of signatures", 
+    xlab="signature size", fill = "#00AFBB", 
+    ggtheme = theme_bw()) +
+    theme(axis.title = element_text(size = 10))
+p45 <- ggarrange(p4, p5, nrow = 2, labels = c("D", "E"), vjust = 0.5)
+```
+
+Conditions on signature level - based on pre-defined categories:
+
+```{r}
+data.dir <- system.file("extdata", package = "BugSigDBPaper")
+tab.file <- file.path(data.dir, "condition2category.txt")
+tab <- read.csv(tab.file, header = FALSE)
+dat[,"Condition"] <- tolower(dat[,"Condition"])
+dat <- subset(dat, Condition %in% tab[,1])
+
+cond2cat <- tab[,2]
+names(cond2cat) <- tab[,1]
+
+cats <- cond2cat[dat[,"Condition"]]
+x <- table(unname(cats))
+categs <- names(sort(x,decreasing = TRUE))
+p6 <- BugSigDBStats::plotComposition(sort(x, decreasing = TRUE), "condition") + 
+      theme(legend.title = element_text(size = 8), legend.text = element_text(size = 6))
+
+leg <- ggpubr::get_legend(p6)
+p6 <- BugSigDBStats::plotComposition(sort(x, decreasing = TRUE), "condition") +
+      theme(legend.position = "none", text = element_text(size = 8))
+```
+
+Conditions on taxon level:
+
+```{r}
+fts <- names(msc.tab)[1:10]
+ftss <- sub("^[a-z]__", "", fts) 
+fts.stats <- lapply(ftss, BugSigDBStats::getTaxonStats,
+                    dat = dat, column = "Condition")
+for(i in seq_along(fts.stats)) names(fts.stats[[i]]) <- cond2cat[names(fts.stats[[i]])]
+.f <- function(stat) vapply(unique(names(stat)), function(n) sum(stat[names(stat) == n]), integer(1))
+fts.stats <- lapply(fts.stats, .f)
+for(i in seq_along(fts.stats)) fts.stats[[i]] <- fts.stats[[i]][categs]
+mat <- do.call(cbind, fts.stats)
+colnames(mat) <- fts
+rownames(mat)[10] <- "medical treatment"
+mat[is.na(mat)] <- 0
+mat2 <- sweep(mat, 2, colSums(mat), `/`)
+```
+
+```{r}
+df <- reshape2::melt(mat)
+colnames(df) <- c("condition", "taxon", "count")
+p7 <- ggpubr::ggbarplot(df, x = "taxon", y = "count", fill = "condition",
+               color = "condition", palette = "npg",
+               orientation = "horiz",
+               ggtheme = theme_bw(),# legend = "none",
+               ylab = "number of signatures", xlab = "")
+p67 <- ggpubr::ggarrange(p6, p7, legend.grob = leg, labels = c("F", "G"))
+p47 <- ggpubr::ggarrange(p45, p67, widths = c(1,2))
+```
+
+Proportion tests of Bacteroides with certain condition categoires when compared
+to their background distribution in the database:
+
+```{r}
+prop.test(c(mat["metabolic disease", "g__Bacteroides"], x["metabolic disease"]),
+          c(sum(mat[,"g__Bacteroides"]),sum(x)))
+prop.test(c(mat["antibiotics", "g__Bacteroides"], x["antibiotics"]),
+          c(sum(mat[,"g__Bacteroides"]),sum(x)))
+```
+
+Putting it all together:
+
+```{r, fig.width = 10, fig.height = 7}
+ggpubr::ggarrange(p12, p47, nrow = 2, heights = c(1,1.3))
+```
+
+```{r, eval = FALSE}
+png("Figure1.png", width = 3375, height = 2109, res = 300)
+ggpubr::ggarrange(p12, p47, nrow = 2, heights = c(1,1.3))
+dev.off()
+```
+
+Supplementary Figure: publication date of the curated papers:
+
+Number of papers and signatures curated:
+
+```{r nrPapers}
+pmids <- unique(dat[,"PMID"])
+length(pmids)
+nrow(dat)
+```
+
+Publication date of the curated papers:
+
+```{r pubDate}
+pmids <- pmids[!is.na(pmids)]
+pubyear1 <- BugSigDBStats::pmid2pubyear(pmids[1:361])
+pubyear2 <- BugSigDBStats::pmid2pubyear(pmids[362:length(pmids)])
+pubyear <- c(pubyear1, pubyear2)
+head(cbind(pmids, pubyear))
+```
+
+```{r pubDate2}
+tab <- table(pubyear)
+tab <- tab[-length(tab)]
+tab <- tab[order(as.integer(names(tab)))]
+df <- data.frame(year = names(tab), papers = as.integer(tab))
+ggpubr::ggbarplot(df, x = "year", y = "papers", 
+                  label = TRUE, fill = "steelblue",
+                  ggtheme = theme_bw())
+```
+
+Supplementary Figure: distribution of taxonomic levels:
+
+```{r taxLevel}
+tab <- BugSigDBStats::getTaxLevelDistribution(msc)
+tab <- tab[-1]
+df <- data.frame(level = names(tab), count = as.integer(tab))
+ggbarplot(df, x = "level", y = "count",
+          xlab = "Taxonomic level", ylab = "Number of unique taxa", 
+          label = TRUE, fill = "steelblue", ggtheme = theme_bw())
+```

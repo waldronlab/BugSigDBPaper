@@ -1,0 +1,524 @@
+---
+title: Figure 4. Microbe co-occurrence 
+vignette: >
+  % \VignetteIndexEntry{Figure 4}
+  % \VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %e, %Y")`'
+output:
+  html_document:
+    mathjax: null   
+---
+
+# Setup
+```{r setup, message=FALSE, warning=FALSE}
+library(bugsigdbr)
+library(curatedMetagenomicData)
+library(ggalluvial)
+library(ggpubr)
+library(BugSigDBStats)
+library(ComplexHeatmap)
+```
+
+# Microbe co-occurrence in fecal samples from BugSigDB
+
+```{r}
+#bsdb <- bugsigdbr::importBugSigDB(version = "1bf4e1b", cache = FALSE)
+bsdb <- bugsigdbr::importBugSigDB(version = "10.5281/zenodo.5904281", cache = FALSE)
+bsdb.feces <- subset(bsdb, `Body site` == "feces")
+```
+
+```{r coocc, fig.width = 10, fig.height = 10}
+cooc.mat <- BugSigDBStats::microbeHeatmap(bsdb.feces, tax.level = "genus")
+antag.mat <- BugSigDBStats::microbeHeatmap(bsdb.feces,
+                                           tax.level = "genus",
+                                           antagonistic = TRUE)
+```
+
+Get the top 20 genera most frequently reported as differentially abundant:
+
+```{r}
+sigs.feces <- bugsigdbr::getSignatures(bsdb.feces, tax.id.type = "taxname",
+                            tax.level = "genus", exact.tax.level = FALSE)
+top20 <- sort(table(unlist(sigs.feces)), decreasing = TRUE)[1:20]
+top20
+```
+
+Subset heatmaps to the top 20 genera most frequently reported as differentially abundant:
+
+```{r}
+all(names(top20) %in% rownames(cooc.mat))
+cooc.mat <- cooc.mat[names(top20), names(top20)]
+all(names(top20) %in% rownames(antag.mat))
+antag.mat <- antag.mat[names(top20), names(top20)]
+```
+
+Distinguish by direction of abundance change (increased / decreased):
+
+```{r}
+# increased
+sub.bsdb.feces <- subset(bsdb.feces, `Abundance in Group 1` == "increased")
+sigs.feces.up <- getSignatures(sub.bsdb.feces, tax.id.type = "taxname",
+                               tax.level = "genus", exact.tax.level = FALSE)
+top20.up <- table(unlist(sigs.feces.up))[names(top20)]
+top20.up
+
+# decreased
+sub.bsdb.feces <- subset(bsdb.feces, `Abundance in Group 1` == "decreased")
+sigs.feces.down <- getSignatures(sub.bsdb.feces, tax.id.type = "taxname",
+                                 tax.level = "genus", exact.tax.level = FALSE)
+top20.down <- table(unlist(sigs.feces.down))[names(top20)]
+top20.down
+```
+
+Plot the heatmap:
+
+```{r mheat, fig.width = 10, fig.height = 10}
+# annotation
+mat <- matrix(nc = 2, cbind(top20.up, top20.down))
+bp <- ComplexHeatmap::anno_barplot(mat, gp = gpar(fill = c("#D55E00", "#0072B2"),
+                                                  col = c("#D55E00", "#0072B2")),
+                                   height = unit(2, "cm"))
+banno <- ComplexHeatmap::HeatmapAnnotation(`Abundance in Group 1` = bp)
+
+lgd_list <- list(
+    Legend(labels = c("increased", "decreased"),
+           title = "Abundance in Group 1",
+           type = "grid",
+           legend_gp = gpar(col = c("#D55E00", "#0072B2"), fill = c("#D55E00", "#0072B2"))))
+
+# same direction
+# lcm <- sweep(cooc.mat, 2, matrixStats::colMaxs(cooc.mat), FUN = "/")
+# we need to dampen the maximum here a bit down,
+# otherwise 100% self co-occurrence takes up a large fraction of the colorscale,
+sec <- apply(cooc.mat, 2, function(x) sort(x, decreasing = TRUE)[2])
+cooc.mat2 <- cooc.mat
+for(i in 1:ncol(cooc.mat2)) cooc.mat2[i,i] <- min(cooc.mat2[i,i], 1.4 * sec[i])
+lcm <- sweep(cooc.mat2, 2, matrixStats::colMaxs(cooc.mat2), FUN = "/")
+col <- circlize::colorRamp2(c(0,1), c("#EEEEEE", "red"))
+ht1 <- ComplexHeatmap::Heatmap(lcm,
+                               col = col,
+                               name = "Relative frequency top",
+                               cluster_columns = FALSE,
+                               row_km = 3,
+                               row_title = "same direction",
+                               column_names_rot = 45,
+                               row_names_gp = gpar(fontsize = 8),
+                               column_names_gp = gpar(fontsize = 8))
+
+# opposite direction
+acm <- sweep(antag.mat, 2, matrixStats::colMaxs(antag.mat), FUN = "/")
+col <- circlize::colorRamp2(c(0,1), c("#EEEEEE", "blue"))
+ht2 <- ComplexHeatmap::Heatmap(acm,
+                               col = col,
+                               name = "Relative frequency bottom",
+                               cluster_columns = FALSE,
+                               row_title = "opposite direction",
+                               row_km = 3,
+                               column_names_rot = 45,
+                               row_names_gp = gpar(fontsize = 8),
+                               column_names_gp = gpar(fontsize = 8))
+
+# phylum
+sfp <- bugsigdbr::getSignatures(bsdb.feces, tax.id.type = "metaphlan",
+                                tax.level = "genus", exact.tax.level = FALSE)
+sfp20 <- sort(table(unlist(sfp)), decreasing = TRUE)[1:20]
+uanno <- bugsigdbr::extractTaxLevel(names(sfp20),
+                                    tax.id.type = "taxname",
+                                    tax.level = "phylum",
+                                    exact.tax.level = FALSE)
+phyla.grid <- seq_along(unique(uanno))
+panno <- ComplexHeatmap::HeatmapAnnotation(phylum = uanno)
+
+uanno <- matrix(uanno, nrow = 1)
+colnames(uanno) <- names(top20)
+pcols <- c("#CC79A7", "#F0E442", "#009E73", "#56B4E9", "#E69F00")
+uanno <- ComplexHeatmap::Heatmap(uanno, name = "Phylum",
+                                 col = pcols[phyla.grid],
+                                 cluster_columns = FALSE,
+                                 column_names_rot = 45,
+                                 column_names_gp = gpar(fontsize = 8))
+
+# put everything together
+ht_list <- ht1 %v% banno %v% ht2 %v% uanno
+ComplexHeatmap::draw(ht_list, annotation_legend_list = lgd_list, merge_legend = TRUE)
+
+decorate_annotation("Abundance in Group 1", {
+    grid.text("# signatures", x = unit(-1, "cm"), rot = 90, just = "bottom", gp = gpar(fontsize = 8))
+    grid.text("*", x = unit(2.45, "cm"), y = unit(1.2, "cm"))
+    grid.text("*", x = unit(5.18, "cm"), y = unit(1, "cm"))
+    grid.text("*", x = unit(6.55, "cm"), y = unit(0.95, "cm"))
+    grid.text("*", x = unit(8.6, "cm"), y = unit(0.85, "cm"))
+    grid.text("*", x = unit(10, "cm"), y = unit(0.7, "cm"))
+    grid.text("*", x = unit(10.7, "cm"), y = unit(0.7, "cm"))
+})
+```
+
+# Contrasting with microbe prevalence in healthy samples
+
+Get healthy samples from curatedMetagenomicData:
+
+```{r}
+healthy <- subset(curatedMetagenomicData::sampleMetadata, disease == "healthy")
+ind <- apply(healthy, 2, function(x) !all(is.na(x)))
+healthy <- healthy[,ind]
+```
+
+Stratify by age:
+
+```{r}
+adult <- subset(healthy, age_category %in% c("adult", "senior"))
+```
+
+Helper function for obtaining signature passing prevalence threshold:
+
+```{r}
+prevalencecutoff <- 0.000001
+.returnSig <- function(obj, threshold = 0, prevalence = 0.000001)
+{
+    fractionpassing.logical <- rowSums(obj > threshold) / ncol(obj)
+    rows.passing <- fractionpassing.logical > prevalence
+    return(fractionpassing.logical[rows.passing])
+}
+```
+
+Obtain stool samples:
+
+```{r, message = FALSE}
+cmd.stool <- subset(adult, body_site == "stool")
+cmd.stool <- curatedMetagenomicData::returnSamples(cmd.stool,
+                                                   "relative_abundance",
+                                                   rownames = "short")
+```
+
+Pull out prevalence on genus level:
+
+```{r}
+cmd.stool.byranks <- mia::splitByRanks(cmd.stool)
+cmd.stool.genus <- assay(cmd.stool.byranks[["genus"]])
+prev.stool.genus <- .returnSig(cmd.stool.genus, prevalence = prevalencecutoff)
+```
+
+Restrict to top 20 genera displayed in Heatmap: 
+
+```{r}
+prev.top20 <- prev.stool.genus[names(top20)]
+prev.top20
+```
+
+Add prevalence as barplot:
+
+```{r, fig.width = 10, fig.height = 10}
+prev <- ComplexHeatmap::anno_barplot(prev.top20,
+                                     height = unit(2, "cm"), 
+                                     gp = gpar(fill = "lightgrey"))
+prev.anno <- ComplexHeatmap::HeatmapAnnotation(Prevalence = prev)
+ht_list <- banno %v% prev.anno %v% ht1 %v% ht2 %v% uanno
+cm <- grid.grabExpr({
+    ComplexHeatmap::draw(ht_list, 
+                         annotation_legend_list = lgd_list,
+                         merge_legend = TRUE)
+
+    decorate_annotation("Abundance in Group 1", {
+        grid.text("# signatures", x = unit(-1, "cm"), 
+                  rot = 90, just = "bottom", gp = gpar(fontsize = 8))
+        grid.text("*", x = unit(1.7, "cm"), y = unit(1.2, "cm"))
+        grid.text("*", x = unit(4.1, "cm"), y = unit(1, "cm"))
+        grid.text("*", x = unit(4.6, "cm"), y = unit(0.95, "cm"))
+        grid.text("*", x = unit(6.05, "cm"), y = unit(0.85, "cm"))
+        grid.text("*", x = unit(7, "cm"), y = unit(0.7, "cm"))
+        grid.text("*", x = unit(7.5, "cm"), y = unit(0.7, "cm"))
+        grid.text("*", x = unit(9.45, "cm"), y = unit(0.6, "cm"))
+    })
+})
+```
+
+There seems to be a trend that high-prevalence genera tend to be reported with
+decreased abundance and low-prevalence genera with increased abundance in the
+diseased group:
+
+```{r}
+prop.up <- mat[,1] / rowSums(mat)
+names(prop.up) <- names(top20)
+cor.test(prev.top20, prop.up)
+```
+
+```{r}
+res <- lm(prop.up ~ prev.top20)
+summary(res)
+#plot(res)
+```
+
+```{r}
+df <- data.frame(prev = prev.top20, prop = prop.up)
+prev.prop <- ggpubr::ggscatter(df, x = "prev", y = "prop", color = "firebrick",
+          xlab = "Prevalence",
+          ylab = "Proportion UP",
+          add = "reg.line",
+          conf.int = TRUE,     
+          ggtheme = ggplot2::theme_bw(),
+          legend = "none") +
+          stat_cor(label.x.npc = "center")
+prev.prop
+```
+
+# Contrasting with correlation in healthy samples
+
+```{r}
+cmd.stool.genus.top20 <- cmd.stool.genus[names(top20),]
+cmat <- cor(t(cmd.stool.genus.top20), method = "spearman")
+cmat[1:5,1:5]
+```
+
+Plot correlation heatmap:
+
+```{r}
+panno <- bugsigdbr::extractTaxLevel(names(sfp20),
+                                    tax.id.type = "taxname",
+                                    tax.level = "phylum",
+                                    exact.tax.level = FALSE)
+canno <- bugsigdbr::extractTaxLevel(names(sfp20), tax.id.type = "taxname", 
+                                    tax.level = "class", exact.tax.level = FALSE)
+ccols <- RColorBrewer::brewer.pal(6, "Set2")
+names(ccols) <- unique(canno)
+pcols <- pcols[1:4]
+names(pcols) <- unique(panno)
+# phylum = panno
+# phylum = pcols
+tanno <- ComplexHeatmap::HeatmapAnnotation(df = data.frame(class = canno),
+                                           col = list(class = ccols))#,
+                                           # annotation_legend_param = list(class = list(direction = "horizontal")))
+diag(cmat) <- NA
+corm <- ComplexHeatmap::Heatmap(cmat, top_annotation = tanno, name = "cor",
+                                na_col = "lightgrey",
+                                column_names_rot = 45,
+                                row_names_gp = gpar(fontsize = 8),
+                                column_names_gp = gpar(fontsize = 8))#,
+                                #heatmap_legend_param = list(direction = "horizontal"))
+corm <- grid.grabExpr(draw(corm, 
+                           heatmap_legend_side = "bottom", 
+                           annotation_legend_side = "bottom",
+                           merge_legend = TRUE))
+corm
+diag(cmat) <- 1
+```
+
+Adding correlation to the co-occurence matrices:
+
+```{r}
+cell_fun <- function(j, i, x, y, width, height, fill)
+{
+        if(cmat[i,j] > 0 && cmat[i,j] < 1)
+            grid.points(x, y, pch = 20, size = unit(cmat[i,j], "char"))
+        if(cmat[i,j] == 1)
+        {
+            grid.rect(x = x, y = y, width = width, height = height, 
+                      gp = gpar(col = NA, fill = "grey"))
+            grid.points(x, y, pch = "*", gp = gpar(col = "white")) 
+            
+        }
+            
+}
+```
+
+```{r}
+rcol <- circlize::colorRamp2(c(0,1), c("#EEEEEE", "red"))
+ht1 <- ComplexHeatmap::Heatmap(lcm,
+                               col = rcol,
+                               cell_fun = cell_fun,
+                               name = "Relative frequency top",
+                               cluster_columns = FALSE,
+                               row_km = 3,
+                               row_title = "same direction",
+                               column_names_rot = 45,
+                               row_names_gp = gpar(fontsize = 8),
+                               column_names_gp = gpar(fontsize = 8))
+```
+
+```{r}
+cell_fun <- function(j, i, x, y, width, height, fill)
+{
+        if(cmat[i,j] < 0)
+            grid.points(x, y, pch = 20, size = unit(cmat[i,j] * -1, "char"))
+}
+```
+
+```{r}
+bcol <- circlize::colorRamp2(c(0,1), c("#EEEEEE", "blue"))
+ht2 <- ComplexHeatmap::Heatmap(acm,
+                               col = bcol,
+                               cell_fun = cell_fun,
+                               name = "Relative frequency bottom",
+                               cluster_columns = FALSE,
+                               row_title = "opposite direction",
+                               row_km = 3,
+                               column_names_rot = 45,
+                               row_names_gp = gpar(fontsize = 8),
+                               column_names_gp = gpar(fontsize = 8))
+```
+
+```{r}
+sgrid <- seq(-1, 1, by = 0.25)[-5]
+bg <- rep(c(bcol(0.4), rcol(0.4)), each = 4)
+ht_list <- banno %v% prev.anno %v% ht1 %v% ht2 %v% uanno
+cor.leg <- ComplexHeatmap::Legend(labels = sgrid, 
+                                  title = "Spearman", 
+                                  type = "points", 
+                                  pch = 20,
+                                  size = unit(abs(sgrid), "char"),
+                                  background = bg)
+lgd_list <- c(lgd_list, cor.leg)
+
+cm <- grid.grabExpr({
+    ComplexHeatmap::draw(ht_list, 
+                         annotation_legend_list = lgd_list,
+                         merge_legend = TRUE)
+
+    decorate_annotation("Abundance in Group 1", {
+        grid.text("# signatures", x = unit(-1, "cm"), 
+                  rot = 90, just = "bottom", gp = gpar(fontsize = 8))
+        grid.text("*", x = unit(1.7, "cm"), y = unit(1.2, "cm"))
+        grid.text("*", x = unit(4.1, "cm"), y = unit(1, "cm"))
+        grid.text("*", x = unit(4.6, "cm"), y = unit(0.95, "cm"))
+        grid.text("*", x = unit(6.05, "cm"), y = unit(0.85, "cm"))
+        grid.text("*", x = unit(7, "cm"), y = unit(0.7, "cm"))
+        grid.text("*", x = unit(7.5, "cm"), y = unit(0.7, "cm"))
+        grid.text("*", x = unit(9.45, "cm"), y = unit(0.6, "cm"))
+    })
+})
+```
+
+Putting it all together:
+
+```{r, fig.width = 11, fig.height = 11}
+ri <- ggarrange(corm, prev.prop, heights = c(1.5, 1), nrow = 2, labels = c("B", "C"))
+ggarrange(cm, ri, ncol = 2, widths = c(1.5,1), labels = c("A", ""))
+```
+
+# Identify conditions associated with certain genera  
+
+```{r}
+genus.bsdb.feces <- bugsigdbr::restrictTaxLevel(bsdb.feces, 
+                                                tax.level = "genus",
+                                                exact.tax.level = FALSE)
+genus.bsdb.feces[["MetaPhlAn taxon names"]] <- lapply(genus.bsdb.feces[["MetaPhlAn taxon names"]], 
+                                                      extractTaxLevel,
+                                                      tax.id.type = "taxname")
+```
+
+A function to obtain stats on an individual taxon for a column of interest:
+
+```{r}
+getTaxonStats <- function(dat, taxon, 
+                          column = "Condition",
+                          direction = "UP")
+{
+    ind <- !is.na(dat[["Abundance in Group 1"]])
+    dat <- dat[ind,]
+    dir <- ifelse(direction == "UP", "increased", "decreased")
+    dat <- subset(dat, `Abundance in Group 1` == dir) 
+    ind <- vapply(dat[["MetaPhlAn taxon names"]], 
+                  function(x) taxon %in% x, 
+                  logical(1))
+    tab <- table(dat[ind,column])
+    tab <- sort(tab, decreasing = TRUE)
+    return(tab)
+}
+```
+
+```{r}
+getTaxonStats(genus.bsdb.feces, "Enterococcus") 
+```
+
+A function to test association of a taxon with a category of a column of interest: 
+
+```{r}
+testAssociation <- function(dat, taxon, column = "Condition", 
+                            category = "", 
+                            direction = "UP")
+{
+    stats <- getTaxonStats(dat, taxon, column, direction)
+    stopifnot(all(category %in% names(stats)))
+
+    fg <- sum(stats[category])
+    fg.total <- sum(stats)    
+
+    dir <- ifelse(direction == "UP", "increased", "decreased")
+    dat <- subset(dat, `Abundance in Group 1` == dir)
+
+    bg <- sum(dat[,column] %in% category)
+    bg.total <- nrow(dat)
+
+    prop.test(c(fg, bg), c(fg.total, bg.total))
+}
+```
+
+```{r}
+testAssociation(genus.bsdb.feces, "Enterococcus", category = "schizophrenia")
+```
+
+Now go through all condition-taxon pairs for which there are at least five signatures
+and test for over-representation, while distinguishing between up and down:
+
+```{r}
+tstats.up <- lapply(names(top20), getTaxonStats, dat = genus.bsdb.feces, direction = "UP")
+tstats.down <- lapply(names(top20), getTaxonStats, dat = genus.bsdb.feces, direction = "DOWN")
+names(tstats.up) <- names(tstats.down) <- names(top20)
+tstats.up <- reshape2::melt(tstats.up)
+tstats.down <- reshape2::melt(tstats.down)
+tstats <- rbind(tstats.up, tstats.down)
+tstats <- cbind(tstats, rep(c("UP", "DOWN"), c(nrow(tstats.up), nrow(tstats.down))))
+colnames(tstats) <- c("Condition", "value", "Taxon", "Direction")
+tstats <- subset(tstats, value > 4)
+head(tstats)
+```
+
+Now test association using a proportion test:
+
+```{r, warning = FALSE}
+ps <- apply(tstats, 1, function(x) testAssociation(genus.bsdb.feces, 
+                                                   taxon = x[3],
+                                                   category = x[1],
+                                                   direction = x[4])$p.value)
+adjp <- p.adjust(ps, method = "BH")
+tstats <- cbind(tstats, pvalue = ps, adj.pvalue = adjp)
+tstats <- tstats[order(tstats$pvalue),]
+head(tstats)
+```
+
+Associations with FDR < 0.05:
+
+```{r}
+sig.tstats <- subset(tstats, adj.pvalue < 0.05)
+sig.tstats
+```
+
+Some cosmetics for plotting:
+
+```{r}
+sig.tstats$Direction <- factor(sig.tstats$Direction, levels = c("UP", "DOWN"))
+sig.tstats$Condition <- as.character(sig.tstats$Condition)
+ind <- sig.tstats$Condition != "COVID-19"
+sig.tstats[ind,"Condition"] <- vapply(sig.tstats[ind,"Condition"], 
+                                    stringr::str_to_sentence,
+                                    character(1))
+aggr <- aggregate(value ~ Condition, sig.tstats[,1:2], FUN = sum)
+aggr <- aggr[order(aggr$value, decreasing = TRUE),]
+sig.tstats$Condition <- factor(sig.tstats$Condition, levels = aggr$Condition)
+aggr <- aggregate(value ~ Taxon, sig.tstats[,2:3], FUN = sum)
+aggr <- aggr[order(aggr$value, decreasing = TRUE),]
+sig.tstats$Taxon <- factor(sig.tstats$Taxon, levels = aggr$Taxon)
+```
+
+
+```{r}
+gga <- ggplot(sig.tstats, aes(y = value, axis1 = Taxon, axis2 = Condition)) + 
+    geom_alluvium(aes(fill = Direction)) + 
+    scale_x_discrete(limits = c("Taxon", "Condition"), expand = c(.1, .1)) + 
+    geom_stratum(width = 1/12, fill = "lightgrey", color = "darkgrey") + 
+    geom_text(stat = "stratum", aes(label = after_stat(stratum))) + 
+    ylab("Number of signatures") + 
+    theme_bw() # + theme(legend.position = "none")
+gga
+```
+

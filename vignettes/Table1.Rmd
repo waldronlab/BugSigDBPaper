@@ -1,0 +1,203 @@
+---
+title: Table 1. BugSigDB metadata annotations 
+vignette: >
+  % \VignetteIndexEntry{Figure 4}
+  % \VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %e, %Y")`'
+output:
+  html_document:
+    mathjax: null   
+---
+
+# Setup
+```{r setup, message=FALSE, warning=FALSE}
+library(bugsigdbr)
+library(BugSigDBStats)
+```
+
+# Get bulk export (version 1.0.2)
+
+```{r}
+dat <- bugsigdbr::importBugSigDB(version = "10.5281/zenodo.5904281", cache = FALSE)
+dim(dat)
+```
+
+# Study stats
+
+## Study design
+
+```{r}
+spl <- split(dat[["Study"]], dat[["Study design"]])
+sds <- lapply(spl, unique)
+sort(lengths(sds), decreasing = FALSE)
+```
+
+# Experiment stats
+
+Columns of the full dataset that describe experiments:
+
+```{r}
+# Experiment ID
+exp.cols <- c("Study", "Experiment")
+
+# Subjects
+sub.cols <- c("Host species",
+              "Location of subjects",
+              "Body site",
+              "Condition",
+              "Antibiotics exclusion",
+              "Group 0 sample size",
+              "Group 1 sample size")
+
+# Lab analysis              
+lab.cols <-  c("Sequencing type",
+              "16S variable region",
+              "Sequencing platform")
+
+# Statistical analysis
+stat.cols <-  c("Statistical test",
+              "MHT correction",
+              "Significance threshold")
+
+# Alpha diversity
+div.cols <- c("Pielou",
+              "Shannon",
+              "Chao1",
+              "Simpson",
+              "Inverse Simpson",
+              "Richness")
+```
+
+Restrict dataset to experiment information:
+
+```{r}
+exps <- dat[,c(exp.cols, sub.cols, lab.cols, stat.cols, div.cols)]
+exps <- unique(exps)
+```
+
+## Subjects
+
+Number of experiments for the top 10 categories for each subjects column:
+
+```{r}
+sub.tab <- lapply(sub.cols[1:5], tabCol, df = exps, n = 10)
+names(sub.tab) <- sub.cols[1:5]
+sub.tab
+```
+
+Proportions instead:
+
+```{r}
+sub.tab <- lapply(sub.cols[1:5], tabCol, df = exps, n = 10, perc = TRUE)
+names(sub.tab) <- sub.cols[1:5]
+sub.tab
+```
+
+Sample size:
+
+```{r}
+ssize <- apply(exps[,sub.cols[6:7]], 2, summary)
+ssize
+```
+
+## Lab analysis
+
+Number of experiments for the top 10 categories for each lab analysis column:
+
+```{r}
+lab.tab <- lapply(lab.cols, tabCol, df = exps, n = 10)
+names(lab.tab) <- lab.cols
+lab.tab
+```
+
+Proportions instead:
+
+```{r}
+lab.tab <- lapply(lab.cols, tabCol, df = exps, n = 10, perc = TRUE)
+names(lab.tab) <- lab.cols
+lab.tab
+```
+
+## Statistical analysis
+
+Number of experiments for the top 10 categories for each statistical analysis column:
+
+```{r}
+stat.tab <- lapply(stat.cols, tabCol, df = exps, n = 10)
+names(stat.tab) <- stat.cols
+stat.tab
+```
+
+Proportions instead:
+
+```{r}
+stat.tab <- lapply(stat.cols, tabCol, df = exps, n = 10, perc = TRUE)
+names(stat.tab) <- stat.cols
+stat.tab
+```
+
+## Alpha diversity
+
+Overall distribution:
+
+```{r}
+apply(exps[,div.cols], 2, table)
+```
+
+Correspondence of Shannon diversity and Richness:
+
+```{r}
+table(exps$Shannon, exps$Richness)
+```
+
+Conditions with consistently increased or decreased alpha diversity:
+
+```{r}
+BugSigDBStats::tabDiv(exps, "Shannon", "Condition")
+BugSigDBStats::tabDiv(exps, "Shannon", "Condition", perc = TRUE)
+BugSigDBStats::tabDiv(exps, "Richness", "Condition")
+BugSigDBStats::tabDiv(exps, "Richness", "Condition", perc = TRUE)
+BugSigDBStats::tabDiv(exps, "any", "Condition")
+BugSigDBStats::tabDiv(exps, "any", "Condition", perc = TRUE)
+```
+
+Body sites with consistently increased or decreased alpha diversity:
+
+```{r}
+BugSigDBStats::tabDiv(exps, "Shannon", "Body site")
+BugSigDBStats::tabDiv(exps, "Shannon", "Body site", perc = TRUE)
+BugSigDBStats::tabDiv(exps, "Richness", "Body site")
+BugSigDBStats::tabDiv(exps, "Richness", "Body site", perc = TRUE)
+BugSigDBStats::tabDiv(exps, "any", "Body site")
+BugSigDBStats::tabDiv(exps, "any", "Body site", perc = TRUE)
+```
+
+How many experiments do not report alpha diversity:
+ 
+```{r}
+ind <- apply(exps[,div.cols], 1, function(x) all(is.na(x)))
+table(ind)
+```
+
+How many experiments report at least one increased / decreased measure of alpha 
+diversity, and how many do not report any change in alpha diversity:
+
+```{r}
+rexps <- exps[!ind,div.cols]
+x <- apply(rexps, 1, table)
+f <- function(s)
+{
+    s2 <- s
+    if(length(s) > 1)
+    {
+        s2 <- s[names(s) != "unchanged"]
+        s2 <- s2[which.max(s2)]
+    }
+    return(names(s2))
+} 
+y <- vapply(x, f, character(1))
+table(y)
+table(y) / nrow(exps) 
+```
+

@@ -1,0 +1,57 @@
+Package: BugSigDBPaper
+Version: 0.99.0
+Title: Analysis code for the BugSigDB manuscript
+Authors@R: c(
+    person(given = "Ludwig",
+           family = "Geistlinger",
+           role = c("aut", "cre"),
+           email = "ludwig_geistlinger@hms.harvard.edu"),
+    person(given = "Levi",
+           family = "Waldron",
+           role = "aut",
+           email = "lwaldron.research@gmail.com"))
+Description: Analysis code for the BugSigDB manuscript.
+URL: https://github.com/waldronlab/BugSigDBFigures
+Depends: R (>= 4.1.0)
+Imports:
+    gganatogram,
+    ontologySimilarity,
+    viridis,
+    XML
+Suggests:
+    aplot,
+    bugsigdbr,
+    circlize,
+    curatedMetagenomicData,
+    enrichplot,
+    gespeR,
+    ggalluvial,
+    ggplot2,
+    ggplotify,
+    ggpubr,
+    ggrepel,
+    ggtree,
+    knitr,
+    lubridate,
+    maps,
+    matrixStats,
+    mia,
+    pkgdown,
+    reshape2,
+    reticulate,
+    rmarkdown,
+    testthat,
+    BugSigDBStats,
+    ComplexHeatmap,
+    EnrichmentBrowser,
+    EnrichmentPlotter,
+    RobustRankAggreg,
+    RColorBrewer
+Remotes:
+    jespermaag/gganatogram,
+    lgeistlinger/EnrichmentPlotter
+License: GPL (>= 3)
+VignetteBuilder: knitr
+LazyData: true
+Encoding: UTF-8
+RoxygenNote: 7.2.0
